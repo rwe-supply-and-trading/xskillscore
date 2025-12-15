@@ -6,6 +6,7 @@ from typing import List, Optional
 import xarray as xr
 
 from .np_deterministic import (
+    _anomaly_correlation_coefficient,
     _effective_sample_size,
     _linslope,
     _mae,
@@ -25,6 +26,7 @@ from .np_deterministic import (
 )
 from .types import Dim, XArray
 from .utils import (
+    _align_climatology,
     _fail_if_dim_empty,
     _preprocess_dims,
     _preprocess_weights,
@@ -48,6 +50,7 @@ __all__ = [
     "spearman_r",
     "spearman_r_eff_p_value",
     "spearman_r_p_value",
+    "anomaly_correlation_coefficient",  # Add this line
 ]
 
 
@@ -906,6 +909,85 @@ def me(
         output_dtypes=[float],
         keep_attrs=keep_attrs,
     )
+
+
+# -----------------------------------------------------------
+# 2) Main ACC with integrated climatology handling
+# -----------------------------------------------------------
+def anomaly_correlation_coefficient(
+    a: XArray,
+    b: XArray,
+    dim: Optional[Dim] = None,
+    weights: Optional[XArray] = None,
+    climatology: Optional[XArray] = None,
+    skipna: bool = False,
+    keep_attrs: bool = False,
+) -> XArray:
+    """
+    Anomaly Correlation Coefficient (ACC).
+
+    If climatology is provided:
+        anomalies = (a - clim), (b - clim)
+    Else:
+        anomalies = (a - mean(a)), (b - mean(b))
+    """
+
+    # -----------------------------------------
+    # PREPROCESSING (identical to pearson_r)
+    # -----------------------------------------
+    _fail_if_dim_empty(dim)
+    dim, _ = _preprocess_dims(dim, a)
+
+    # broadcast a & b
+    a, b = xr.broadcast(a, b, exclude=dim)
+
+    # stack inputs (so apply_ufunc sees a single axis)
+    a, b, new_dim, weights = _stack_input_if_needed(a, b, dim, weights)
+
+    # weights preprocessing
+    weights = _preprocess_weights(a, dim, new_dim, weights)
+
+    # -----------------------------------------
+    # CLIMATOLOGY ALIGNMENT + ANOMALIES
+    # -----------------------------------------
+    if climatology is not None:
+        clim = _align_climatology(climatology, b, time_dim=new_dim)
+        a_anom = a - clim
+        b_anom = b - clim
+    else:
+        # weighted or unweighted mean
+        if weights is None:
+            a_mean = a.mean(new_dim, skipna=skipna)
+            b_mean = b.mean(new_dim, skipna=skipna)
+        else:
+            w = weights / weights.sum(new_dim)
+            a_mean = (a * w).sum(new_dim)
+            b_mean = (b * w).sum(new_dim)
+
+        a_anom = a - a_mean
+        b_anom = b - b_mean
+
+    # -----------------------------------------
+    # Determine core dims (same as pearson_r)
+    # -----------------------------------------
+    input_core_dims = _determine_input_core_dims(new_dim, weights)
+
+    # -----------------------------------------
+    # APPLY UFUNC (pearson_r-style)
+    # -----------------------------------------
+    out = xr.apply_ufunc(
+        _anomaly_correlation_coefficient,
+        a_anom,
+        b_anom,
+        weights,
+        input_core_dims=input_core_dims,
+        kwargs={"axis": -1, "skipna": skipna},
+        dask="parallelized",
+        output_dtypes=[float],
+        keep_attrs=keep_attrs,
+    )
+
+    return out
 
 
 def rmse(

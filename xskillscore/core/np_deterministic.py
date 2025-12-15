@@ -27,6 +27,7 @@ __all__ = [
     "_spearman_r",
     "_spearman_r_eff_p_value",
     "_spearman_r_p_value",
+    "_anomaly_correlation_coefficient",  # Add this line
 ]
 
 
@@ -262,10 +263,59 @@ def _r2(a, b, weights, axis, skipna):
     return r2
 
 
+def _anomaly_correlation_coefficient(a_anom, b_anom, weights=None, axis=-1, skipna=False):
+    """ndarray implementation of anomaly correlation coefficient.
+
+    Parameters
+    ----------
+    a : ndarray
+        Input array.
+    b : ndarray
+        Input array.
+    axis : int
+        The axis to apply the correlation along.
+    weights : ndarray
+        Input array of weights for a and b.
+    skipna : bool
+        If True, skip NaNs when computing function.
+
+    Returns
+    -------
+    res : ndarray
+        Anomaly Correlation Coefficient.
+
+    """
+    sumfunc, meanfunc = _get_numpy_funcs(skipna)
+    if skipna:
+        a_anom, b_anom, weights = _match_nans(a_anom, b_anom, weights)
+    weights = _check_weights(weights)
+    a_anom = np.rollaxis(a_anom, axis)
+    b_anom = np.rollaxis(b_anom, axis)
+    if weights is not None:
+        weights = np.rollaxis(weights, axis)
+
+    # am, bm = __compute_anomalies(a, b, weights=weights, axis=0, skipna=skipna)
+
+    if weights is not None:
+        r_num = sumfunc(weights * a_anom * b_anom, axis=0)
+        r_den = np.sqrt(
+            sumfunc(weights * a_anom * a_anom, axis=0) * sumfunc(weights * b_anom * b_anom, axis=0)
+        )
+    else:
+        r_num = sumfunc(a_anom * b_anom, axis=0)
+        r_den = np.sqrt(sumfunc(a_anom * a_anom, axis=0) * sumfunc(b_anom * b_anom, axis=0))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        r = r_num / r_den
+    acc = np.clip(r, -1.0, 1.0)
+    return acc
+
+
 def _pearson_r(a, b, weights, axis, skipna):
     """ndarray implementation of scipy.stats.pearsonr.
 
-    Parameters
+    Para_anometers
     ----------
     a : ndarray
         Input array.

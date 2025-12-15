@@ -847,6 +847,81 @@ def rps(
     return res
 
 
+def rpss(
+    observations: XArray,
+    forecasts: XArray,
+    category_edges: np.ndarray | XArray | Tuple[XArray, XArray] | None,
+    climatology: Optional[XArray] = None,
+    dim: Optional[Dim] = "time",
+    fair: bool = False,
+    weights: Optional[XArray] = None,
+    keep_attrs: bool = False,
+    member_dim: str = "member",
+    input_distributions: Optional[Literal["c", "p"]] = None,
+):
+    """
+    Ranked Probability Skill Score (RPSS)
+
+    RPSS = 1 - RPS_forecast / RPS_reference
+
+    where the reference forecast is climatology constructed from observations.
+    """
+
+    # ---------------------------------------------------
+    # 1. Compute forecast RPS
+    # ---------------------------------------------------
+    rps_f = rps(
+        observations=observations,
+        forecasts=forecasts,
+        category_edges=category_edges,
+        dim=dim,
+    )
+    # ---------------------------------------------------
+    # 2. Build climatology reference forecast
+    # ---------------------------------------------------
+    # climatology = _align_climatology(climatology, observations, time_dim=dim)
+
+    clim_cdf = xr.concat(
+        [
+            (climatology < category_edges[0]).assign_coords(category="cat0"),
+            ((climatology >= category_edges[0]) & (climatology < category_edges[1])).assign_coords(
+                category="cat1"
+            ),
+            (climatology >= category_edges[1]).assign_coords(category="cat2"),
+        ],
+        dim="category",
+    ).astype("float")
+
+    obs_cdf = xr.concat(
+        [
+            (observations < category_edges[0]).assign_coords(category="cat0"),
+            (
+                (observations >= category_edges[0]) & (observations < category_edges[1])
+            ).assign_coords(category="cat1"),
+            (observations >= category_edges[1]).assign_coords(category="cat2"),
+        ],
+        dim="category",
+    ).astype("float")
+
+    # ---------------------------------------------------
+    # 3. Compute RPS for the reference climatology
+    # ---------------------------------------------------
+    rps_ref = rps(
+        observations=obs_cdf,
+        forecasts=clim_cdf,
+        category_edges=None,
+        input_distributions="c",
+        dim=dim,
+    )
+
+    # ---------------------------------------------------
+    # 4. Return RPSS
+    # ---------------------------------------------------
+    rpss_score = 1 - (rps_f / rps_ref)
+
+    return rpss_score
+
+
 def rank_histogram(
     observations: XArray,
     forecasts: XArray,

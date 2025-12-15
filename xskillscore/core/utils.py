@@ -201,3 +201,41 @@ def _keep_nans_masked(observations, forecasts, res, dim=None, member_dim="member
         forecasts.notnull().any(forecasts_mask_dim)
     )
     return res
+
+
+def _align_climatology(clim, obs, time_dim="time"):
+    """
+    Normalize any type of climatology to match obs(time, lat, lon).
+    """
+
+    # Step 0: Spatial alignment
+    if ("lat" in clim.coords and "lat" in obs.coords) and (
+        "lon" in clim.coords and "lon" in obs.coords
+    ):
+        clim = clim.interp(lat=obs.lat, lon=obs.lon, method="nearest")
+
+    # CASE A — Static climatology: (lat, lon)
+    if time_dim not in clim.dims and "dayofyear" not in clim.dims:
+        return clim.broadcast_like(obs)
+
+    # CASE B — DOY climatology: (dayofyear, lat, lon)
+    if "dayofyear" in clim.dims:
+        obs_doy = obs[time_dim].dt.dayofyear
+
+        # Step 1: advanced index along dayofyear
+        mapped = clim.sel(dayofyear=obs_doy)
+
+        # IMPORTANT: remove any pre-existing "time" coordinate
+        if "time" in mapped.coords:
+            mapped = mapped.drop_vars("time")
+
+        # Step 2: rename dayofyear → time
+        mapped = mapped.rename({"dayofyear": time_dim})
+
+        # Step 3: assign correct time coordinate values
+        mapped = mapped.assign_coords({time_dim: obs[time_dim].values})
+
+        # Step 4: broadcast across spatial dims
+        mapped = mapped.broadcast_like(obs)
+
+        return mapped
