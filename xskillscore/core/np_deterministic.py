@@ -315,7 +315,7 @@ def _anomaly_correlation_coefficient(a_anom, b_anom, weights=None, axis=-1, skip
 def _pearson_r(a, b, weights, axis, skipna):
     """ndarray implementation of scipy.stats.pearsonr.
 
-    Para_anometers
+    Parameters
     ----------
     a : ndarray
         Input array.

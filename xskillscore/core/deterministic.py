@@ -925,11 +925,65 @@ def anomaly_correlation_coefficient(
 ) -> XArray:
     """
     Anomaly Correlation Coefficient (ACC).
+    
+    ACC is defined as the Pearson correlation coefficient between the anomalies of the forecast 
+    and the anomalies of the observation, where anomalies are computed either with respect to a 
+    provided climatology or, if not provided, with respect to the mean of each input 
+    over the specified dimension(s).
 
-    If climatology is provided:
-        anomalies = (a - clim), (b - clim)
-    Else:
-        anomalies = (a - mean(a)), (b - mean(b))
+    If a climatology is provided, anomalies are computed as deviations from
+    that climatology:
+        a' = a - clim
+        b' = b - clim
+
+    If no climatology is provided, anomalies are computed relative to the
+    (optionally weighted) mean along ``dim``:
+        a' = a - mean(a)
+        b' = b - mean(b)
+
+    The anomaly correlation coefficient is then computed as (possibly weighted)
+    Pearson correlation of the anomaly fields:
+        ACC = sum(a' * b') / sqrt(sum(a'^2) * sum(b'^2))
+
+    Parameters
+    ----------
+    a : xarray.Dataset or xarray.DataArray
+        Labeled array(s) containing the first field.
+    b : xarray.Dataset or xarray.DataArray
+        Labeled array(s) containing the second field.
+    dim : str or list, optional
+        Dimension(s) over which to compute the ACC. These dimensions will be
+        reduced in the output. Defaults to None, reducing all dimensions.
+    weights : xarray.Dataset or xarray.DataArray or None
+        Weights matching dimensions of ``dim`` to apply during the computation.
+    climatology : xarray.Dataset or xarray.DataArray or None
+        Optional climatology used to compute anomalies. Supported forms include
+        static climatologies ``(lat, lon)`` and day-of-year climatologies
+        ``(dayofyear, lat, lon)``.
+    skipna : bool
+        If True, skip NaNs when computing the coefficient.
+    keep_attrs : bool
+        If True, copy attributes from the first input to the output.
+
+    Returns
+    -------
+    xarray.DataArray or xarray.Dataset
+        Anomaly correlation coefficient.
+
+    Notes
+    -----
+    - ACC is symmetric: ``ACC(a, b) == ACC(b, a)``.
+    - When a climatology is provided, it is spatially interpolated and
+      temporally aligned to match ``b`` before anomaly computation.
+
+
+    Examples
+    --------
+    >>> a = xr.DataArray(np.random.rand(5, 3, 3), dims=["time", "x", "y"])
+    >>> b = xr.DataArray(np.random.rand(5, 3, 3), dims=["time", "x", "y"])
+    >>> xs.anomaly_correlation_coefficient(a, b, dim="time")
+    <xarray.DataArray (x: 3, y: 3)>
+
     """
 
     # -----------------------------------------
