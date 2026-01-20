@@ -850,74 +850,255 @@ def rps(
 def rpss(
     observations: XArray,
     forecasts: XArray,
+    reference: XArray,
     category_edges: np.ndarray | XArray | Tuple[XArray, XArray] | None,
-    climatology: Optional[XArray] = None,
     dim: Optional[Dim] = "time",
-    fair: bool = False,
     weights: Optional[XArray] = None,
     keep_attrs: bool = False,
     member_dim: str = "member",
     input_distributions: Optional[Literal["c", "p"]] = None,
 ):
     """
-    Ranked Probability Skill Score (RPSS)
+    Calculate Ranked Probability Skill Score (RPSS).
 
-    RPSS = 1 - RPS_forecast / RPS_reference
+    The Ranked Probability Skill Score (RPSS) measures the skill of a *probabilistic
+    forecast system* relative to a *reference forecast*, typically climatology or
+    a hindcast ensemble. It is defined in terms of the Ranked Probability Score (RPS)
+    and quantifies the fractional improvement of the forecast over the reference.
 
-    where the reference forecast is climatology constructed from observations.
+    RPSS is defined as:
+
+    .. math::
+        RPSS = 1 - \\frac{RPS_{forecast}}{RPS_{reference}}
+
+    where ``RPS_forecast`` and ``RPS_reference`` are mean Ranked Probability Scores
+    computed over the dimension(s) specified by ``dim``.
+
+    Interpretation:
+        - ``RPSS = 1`` : perfect forecast skill relative to the reference
+        - ``RPSS = 0`` : no improvement over the reference
+        - ``RPSS < 0`` : forecast is worse than the reference (misleading)
+
+    Unlike RPS, RPSS is a *relative* measure and is therefore meaningful only when
+    the reference forecast is well-defined and appropriate for the application.
+
+    Supported Analysis Configurations
+    ---------------------------------
+    This implementation supports **ensemble-based RPSS**, which is the standard
+    usage in weather and climate forecast verification.
+
+    The following configurations are supported:
+
+    1. **Ensemble forecast vs ensemble reference**
+       - Typical use: comparing a real-time ensemble forecast against a hindcast
+         ensemble baseline.
+       - Both forecasts and reference must contain the ensemble member dimension
+         ``member_dim``.
+       - ``category_edges`` must be provided.
+       - Fair-score correction (Ferro, 2013) is applied to both.
+
+    2. **Ensemble forecast vs probabilistic reference**
+       - Typical use: comparing an ensemble forecast against a climatological
+         probability distribution (e.g. tercile climatology).
+       - Forecast must contain ``member_dim``.
+       - Reference must contain a ``category`` dimension representing a probability
+         mass function or cumulative distribution.
+       - ``category_edges`` must be provided for the ensemble forecast.
+       - No fair-score correction is applied to the probabilistic reference.
+
+    Unsupported Configurations
+    --------------------------
+    - Probabilistic forecasts (i.e. forecasts already expressed in category space)
+      are **not supported** at the RPSS level.
+    - Deterministic reference forecasts are not supported.
+    - Mixed deterministic–ensemble comparisons are not supported.
+
+    Parameters
+    ----------
+    observations : xarray.Dataset or xarray.DataArray
+        Observed values of the predictand. Observations must be deterministic
+        and expressed in physical units. The dimensionality must be compatible
+        with ``forecasts`` and ``reference`` after reduction over ``dim``.
+    forecasts : xarray.Dataset or xarray.DataArray
+        Forecast values. Must be an ensemble forecast expressed in physical
+        units and contain the ensemble member dimension ``member_dim``.
+        Probabilistic forecasts defined directly over categories are not supported.
+    reference : xarray.Dataset or xarray.DataArray
+        Reference forecast against which skill is evaluated.
+        Supported forms:
+        - Ensemble reference (hindcast): must contain ``member_dim``.
+        - Probabilistic reference (e.g. climatology): must contain a ``category``
+          dimension representing category probabilities or cumulative probabilities.
+    category_edges : array_like, xr.Dataset, xr.DataArray, or tuple, required
+        Category boundaries used to bin forecasts and observations when computing
+        RPS. Required whenever forecasts or reference are ensembles.
+        See ``rps`` documentation for detailed semantics and supported formats.
+    dim : str or list of str, optional
+        Dimension(s) over which to average RPS values before computing RPSS.
+        Typically includes ``"time"``. Defaults to ``"time"``.
+    weights : xarray.DataArray, optional
+        Weights applied when averaging RPS over ``dim``. Must be broadcastable
+        to ``observations``.
+    keep_attrs : bool, optional
+        If True, attributes from the input forecasts and observations are copied
+        to the output. Default is False.
+    member_dim : str, optional
+        Name of the ensemble member dimension. Default is ``"member"``.
+    input_distributions : {"p", "c"}, optional
+        Specifies the type of probabilistic reference input when ``reference`` is
+        probabilistic and ``category_edges`` is None.
+
+        - ``"p"`` : reference is a probability mass function over categories
+        - ``"c"`` : reference is a cumulative distribution function
+
+        Ignored for ensemble references.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        Ranked Probability Skill Score with dimensions equal to the input
+        dimensions minus those reduced by ``dim``.
+
+    Notes
+    -----
+    - RPSS is undefined when ``RPS_reference == 0``. In this case, NaN is returned.
+    - Fair-score correction is applied **only** to ensemble-based RPS calculations.
+    - All RPS calculations are delegated to ``rps()`` to ensure consistent
+      binning, masking, and weighting behavior.
+
+    References
+    ----------
+    * Weigel, A. P., Liniger, M. A., & Appenzeller, C. (2007).
+      The Discrete Brier and Ranked Probability Skill Scores.
+      Monthly Weather Review, 135(1), 118–124.
+      doi: 10.1175/MWR3280.1
+
+    * Ferro, C. A. T. (2013).
+      Fair scores for ensemble forecasts.
+      Quarterly Journal of the Royal Meteorological Society, 140, 1917–1923.
+      doi: 10.1002/qj.2270
     """
 
     # ---------------------------------------------------
-    # 1. Compute forecast RPS
+    # Basic sanity checks
+    # ---------------------------------------------------
+    if reference is None:
+        raise ValueError("RPSS requires an explicit reference forecast.")
+
+    # weights must be broadcastable to observations
+    if weights is not None:
+        extra = set(weights.dims) - set(observations.dims)
+        if extra:
+            raise ValueError(f"weights has dims not present in observations: {sorted(extra)}")
+
+    # normalize dim
+    if isinstance(dim, str):
+        dim_ = [dim]
+    else:
+        dim_ = dim
+
+    # ---------------------------------------------------
+    # Determine RPSS analysis type and explain intent
+    # ---------------------------------------------------
+    forecast_is_ensemble = member_dim in forecasts.dims
+    reference_is_ensemble = member_dim in reference.dims
+
+    forecast_is_probabilistic = "category" in forecasts.dims
+    reference_is_probabilistic = "category" in reference.dims
+
+    if forecast_is_probabilistic:
+        raise ValueError("Probabilistic forecasts are not supported at the RPSS level. ")
+
+    if forecast_is_ensemble and reference_is_ensemble:
+        analysis_type = "ensemble_vs_ensemble"
+        analysis_explanation = (
+            "Both forecast and reference are ensembles in physical space. "
+            "RPSS compares ensemble-based RPS of the forecast against "
+            "ensemble-based RPS of the reference (e.g. hindcast baseline). "
+            "Fair score correction is applied to both."
+        )
+
+    elif forecast_is_ensemble and reference_is_probabilistic:
+        analysis_type = "ensemble_vs_probabilistic_reference"
+        analysis_explanation = (
+            "Forecast is an ensemble in physical space, while the reference is a "
+            "probabilistic forecast over predefined categories (e.g. climatology). "
+            "Forecast RPS is computed from ensemble member frequencies within bins, "
+            "and reference RPS is computed directly from category probabilities."
+        )
+
+    else:
+        raise ValueError(
+            "Unsupported RPSS configuration. "
+            "This implementation supports:\n"
+            "  - ensemble forecast vs ensemble reference\n"
+            "  - ensemble forecast vs probabilistic reference\n"
+            f"Got forecasts.dims={forecasts.dims}, reference.dims={reference.dims}"
+        )
+
+    # ---------------------------------------------------
+    # Forecast must be ensemble
+    # ---------------------------------------------------
+    if not forecast_is_ensemble:
+        raise ValueError(
+            "RPSS requires ensemble forecasts in physical space. "
+            "Probabilistic forecasts are not supported at the RPSS level."
+        )
+
+    if category_edges is None:
+        raise ValueError("category_edges must be provided for ensemble forecasts.")
+
+    # ---------------------------------------------------
+    # 1. Forecast RPS
     # ---------------------------------------------------
     rps_f = rps(
         observations=observations,
         forecasts=forecasts,
         category_edges=category_edges,
-        dim=dim,
-    )
-    # ---------------------------------------------------
-    # 2. Build climatology reference forecast
-    # ---------------------------------------------------
-    # climatology = _align_climatology(climatology, observations, time_dim=dim)
-
-    clim_cdf = xr.concat(
-        [
-            (climatology < category_edges[0]).assign_coords(category="cat0"),
-            ((climatology >= category_edges[0]) & (climatology < category_edges[1])).assign_coords(
-                category="cat1"
-            ),
-            (climatology >= category_edges[1]).assign_coords(category="cat2"),
-        ],
-        dim="category",
-    ).astype("float")
-
-    obs_cdf = xr.concat(
-        [
-            (observations < category_edges[0]).assign_coords(category="cat0"),
-            (
-                (observations >= category_edges[0]) & (observations < category_edges[1])
-            ).assign_coords(category="cat1"),
-            (observations >= category_edges[1]).assign_coords(category="cat2"),
-        ],
-        dim="category",
-    ).astype("float")
-
-    # ---------------------------------------------------
-    # 3. Compute RPS for the reference climatology
-    # ---------------------------------------------------
-    rps_ref = rps(
-        observations=obs_cdf,
-        forecasts=clim_cdf,
-        category_edges=None,
-        input_distributions="c",
-        dim=dim,
+        dim=dim_,
+        fair=True,
+        weights=weights,
+        member_dim=member_dim,
+        keep_attrs=keep_attrs,
     )
 
     # ---------------------------------------------------
-    # 4. Return RPSS
+    # 2. Reference RPS
     # ---------------------------------------------------
-    rpss_score = 1 - (rps_f / rps_ref)
+    if reference_is_ensemble:
+        rps_r = rps(
+            observations=observations,
+            forecasts=reference,
+            category_edges=category_edges,
+            dim=dim_,
+            fair=True,
+            weights=weights,
+            member_dim=member_dim,
+            keep_attrs=keep_attrs,
+        )
+    else:
+        if "category" not in reference.dims:
+            raise ValueError("Probabilistic reference must have a 'category' dimension.")
+
+        rps_r = rps(
+            observations=observations,
+            forecasts=reference,
+            category_edges=None,
+            input_distributions=input_distributions,
+            dim=dim_,
+            fair=False,
+            weights=weights,
+            keep_attrs=keep_attrs,
+        )
+
+    # ---------------------------------------------------
+    # 3. RPSS (numerical safety)
+    # ---------------------------------------------------
+    rpss_score = xr.where(
+        rps_r > 0,
+        1.0 - (rps_f / rps_r),
+        np.nan,
+    )
 
     return rpss_score
 
