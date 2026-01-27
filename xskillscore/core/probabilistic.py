@@ -13,6 +13,7 @@ from .np_probabilistic import _reliability
 from .types import Dim, XArray
 from .utils import (
     _add_as_coord,
+    _align_climatology,
     _bool_to_int,
     _check_identical_xr_types,
     _fail_if_dim_empty,
@@ -850,8 +851,8 @@ def rps(
 def rpss(
     observations: XArray,
     forecasts: XArray,
-    category_edges: np.ndarray | XArray | Tuple[XArray, XArray] | None,
     climatology: Optional[XArray] = None,
+    category_edges: np.ndarray | XArray | Tuple[XArray, XArray] | None = None,
     dim: Optional[Dim] = "time",
     fair: bool = False,
     weights: Optional[XArray] = None,
@@ -860,64 +861,127 @@ def rpss(
     input_distributions: Optional[Literal["c", "p"]] = None,
 ):
     """
-    Ranked Probability Skill Score (RPSS)
+    Ranked Probability Skill Score (RPSS).
 
-    RPSS = 1 - RPS_forecast / RPS_reference
+    The Ranked Probability Skill Score (RPSS) is a measure of the skill of probabilistic forecasts
+    relative to a reference forecast, typically climatology. It is based on the Ranked Probability Score (RPS),
+    which generalizes the Brier Score to multi-category (ordinal) events.
 
-    where the reference forecast is climatology constructed from observations.
+    RPSS is defined as:
+        RPSS = 1 - (RPS_forecast / RPS_reference)
+
+    where:
+        - RPS_forecast is the mean RPS of the forecast being evaluated.
+          (RPSS-obs) = 1 - RPS(forecast) / RPS(obs)
+        - RPS_reference is the mean RPS of a reference forecast (usually climatology).
+          (RPSS-climat) = 1 - RPS(forecast) / RPS(climat).
+
+
+    Parameters
+    ----------
+    observations : xarray.DataArray
+        Array of observed values. Should be compatible with `forecasts` and `category_edges`.
+    forecasts : xarray.DataArray
+        Array of forecast values. Should be probabilities for each category or raw values to be categorized.
+    category_edges : np.ndarray, xarray.DataArray, tuple of xarray.DataArray, or None
+        The edges defining the categories. For tercile forecasts, this is typically a length-2 array of thresholds.
+        If None, assumes forecasts and observations are already provided as cumulative probabilities.
+    climatology : xarray.DataArray, optional
+        Climatological reference forecast. If None, will be estimated from observations.
+    dim : str or sequence of str, optional
+        Dimension(s) over which to compute the RPSS. Default is "time".
+    fair : bool, optional
+        If True, computes the fair RPSS (not currently implemented).
+    weights : xarray.DataArray, optional
+        Weights to apply when averaging scores.
+    keep_attrs : bool, optional
+        If True, retains attributes from the input in the output.
+    member_dim : str, optional
+        Name of the ensemble member dimension, if applicable. Default is "member".
+    input_distributions : {"c", "p"}, optional
+        If "c", inputs are cumulative distributions. If "p", inputs are probability distributions.
+        If None, inferred from input shape.
+
+    Returns
+    -------
+    xarray.DataArray
+        The RPSS score, with the same dimensions as the input minus those reduced by `dim`.
+
+
+    Notes
+    --------
+    - RPSS = 1 the forecast has perfect skill compared to the reference (observations or climatology)
+        - forecast beneficial;
+    - RPSS = 0 the forecast has no skill compared to the reference (observations or climatology)
+        - forecast has no benefit over climatology;
+    - RPSS = a negative value the forecast is less accurate than the reference (observations or climatology)
+        - forecast misleading.
+
+    Examples
+    --------
+    >>> import xarray as xr
+    >>> import numpy as np
+    >>> from xskillscore.core.probabilistic import rpss
+    >>> obs = xr.DataArray(np.random.randint(0, 3, size=100), dims="time")
+    >>> fcst = xr.DataArray(np.random.rand(100, 3), dims=("time", "category"))
+    >>> fcst = fcst / fcst.sum("category")  # normalize to probabilities
+    >>> category_edges = np.array([0.33, 0.66])
+    >>> score = rpss(obs, fcst, category_edges)
     """
 
     # ---------------------------------------------------
-    # 1. Compute forecast RPS
+    # 0. Calculate Category Edges
     # ---------------------------------------------------
-    rps_f = rps(
+
+    # ---------------------------------------------------
+    # 1. Compute RPS_forecast (forecast vs obs)
+    # ---------------------------------------------------
+    rps_forecast = rps(
         observations=observations,
         forecasts=forecasts,
         category_edges=category_edges,
         dim=dim,
+        fair=fair,
+        weights=weights,
+        member_dim=member_dim,
+        input_distributions=input_distributions,
+        keep_attrs=keep_attrs,
     )
+
     # ---------------------------------------------------
     # 2. Build climatology reference forecast
     # ---------------------------------------------------
-    # climatology = _align_climatology(climatology, observations, time_dim=dim)
+    # Align climatology to observations (time, lat, lon, etc.)
+    clim = _align_climatology(climatology, observations, time_dim=dim)
 
-    clim_cdf = xr.concat(
-        [
-            (climatology < category_edges[0]).assign_coords(category="cat0"),
-            ((climatology >= category_edges[0]) & (climatology < category_edges[1])).assign_coords(
-                category="cat1"
-            ),
-            (climatology >= category_edges[1]).assign_coords(category="cat2"),
-        ],
-        dim="category",
-    ).astype("float")
-
-    obs_cdf = xr.concat(
-        [
-            (observations < category_edges[0]).assign_coords(category="cat0"),
-            (
-                (observations >= category_edges[0]) & (observations < category_edges[1])
-            ).assign_coords(category="cat1"),
-            (observations >= category_edges[1]).assign_coords(category="cat2"),
-        ],
-        dim="category",
-    ).astype("float")
+    # Convert climatology into a probabilistic forecast
+    # using the same category_edges logic as rps()
+    if category_edges is not None:
+        # deterministic climatology → CDF forecast
+        clim_forecast = clim
+    else:
+        # already probabilistic input
+        clim_forecast = clim
 
     # ---------------------------------------------------
-    # 3. Compute RPS for the reference climatology
+    # 3. Compute RPS_reference (climatology vs obs)
     # ---------------------------------------------------
-    rps_ref = rps(
-        observations=obs_cdf,
-        forecasts=clim_cdf,
-        category_edges=None,
-        input_distributions="c",
+    rps_reference = rps(
+        observations=observations,
+        forecasts=clim_forecast,
+        category_edges=category_edges,
         dim=dim,
+        fair=False,  # reference is not ensemble-based
+        weights=weights,
+        member_dim=member_dim,
+        input_distributions=input_distributions,
+        keep_attrs=keep_attrs,
     )
 
     # ---------------------------------------------------
-    # 4. Return RPSS
+    # 4. Calculate and Return RPSS
     # ---------------------------------------------------
-    rpss_score = 1 - (rps_f / rps_ref)
+    rpss_score = 1.0 - (rps_forecast / rps_reference)
 
     return rpss_score
 
