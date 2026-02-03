@@ -2,6 +2,7 @@
 requires = ["setuptools>=64", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
+
 [project]
 name = "xskillscore"
 dependencies = [
@@ -47,8 +48,12 @@ test = [
     "pytest-xdist",
     "scikit-learn",
 ]
+viz = [
+    "matplotlib",
+    "cartopy"
+]
 complete = [
-    "xskillscore[test]",
+    "xskillscore[test, viz]",
     "doc8",
     "ipykernel",
     "ipython",
@@ -61,6 +66,7 @@ complete = [
     "sphinx-copybutton",
     "sphinx-rtd-theme>=1.0",
 ]
+
 
 [project.urls]
 repository = "https://github.com/xarray-contrib/xskillscore"

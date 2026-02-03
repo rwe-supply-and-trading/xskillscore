@@ -201,3 +201,60 @@ def _keep_nans_masked(observations, forecasts, res, dim=None, member_dim="member
         forecasts.notnull().any(forecasts_mask_dim)
     )
     return res
+
+
+def _align_climatology(clim, obs, time_dim="time"):
+    """
+    Normalize any type of climatology to match obs(time, lat, lon).
+
+    Supports:
+    1. Static climatology : `(lat, lon)`: broadcast across `obs[time_dim]`
+    2. Day-of-year climatology:  `(dayofyear, lat, lon)`: indexed by
+      `obs[time_dim].dt.dayofyear`, renamed to `time_dim`, and assigned the
+      observation timestamps
+
+    If both inputs define `lat`/`lon`, the climatology is first interpolated onto
+    the observation grid using nearest-neighbor interpolation.
+    """
+
+    # TODO: performs interpolation using the "nearest" method without validating that the
+    # climatology and observation grids are compatible. If the lat/lon coordinates are
+    # vastly different or incompatible, this could lead to unexpected results or errors.
+    # Step 0: Spatial alignment
+    if ("lat" in clim.coords and "lat" in obs.coords) and (
+        "lon" in clim.coords and "lon" in obs.coords
+    ):
+        clim = clim.interp(lat=obs.lat, lon=obs.lon, method="nearest")
+
+    # CASE A — Static climatology: (lat, lon)
+    if time_dim not in clim.dims and "dayofyear" not in clim.dims:
+        return clim.broadcast_like(obs)
+
+    # CASE B — DOY climatology: (dayofyear, lat, lon)
+    if "dayofyear" in clim.dims:
+        obs_doy = obs[time_dim].dt.dayofyear
+
+        # Step 1: advanced index along dayofyear
+        mapped = clim.sel(dayofyear=obs_doy)
+
+        # IMPORTANT: remove any pre-existing "time" coordinate
+        if "time" in mapped.coords:
+            mapped = mapped.drop_vars("time")
+
+        # Step 2: rename dayofyear → time
+        mapped = mapped.rename({"dayofyear": time_dim})
+
+        # Step 3: assign correct time coordinate values
+        mapped = mapped.assign_coords({time_dim: obs[time_dim].values})
+
+        # Step 4: broadcast across spatial dims
+        mapped = mapped.broadcast_like(obs)
+
+        return mapped
+
+    # CASE C — time-based climatology: (time, lat, lon)
+    if time_dim in clim.dims:
+        raise ValueError(
+            "Climatology with a 'time' dimension (time-based climatology) is not supported by _align_climatology. "
+            "Please provide a static (lat, lon) or day-of-year (DOY) climatology."
+        )

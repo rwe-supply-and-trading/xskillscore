@@ -22,6 +22,7 @@ from xskillscore.core.deterministic import (
     spearman_r,
     spearman_r_eff_p_value,
     spearman_r_p_value,
+    anomaly_correlation_coefficient,
 )
 from xskillscore.core.probabilistic import (
     brier_score,
@@ -38,6 +39,58 @@ from xskillscore.core.probabilistic import (
 from xskillscore.core.resampling import resample_iterations, resample_iterations_idx
 from xskillscore.core.stattests import multipletests
 from xskillscore.versioning.print_versions import show_versions
+
+from xskillscore.core.viz import plot_rank_histogram, plot_rank_histogram_map_cartopy
+
+__all__ = [
+    # deterministic
+    "effective_sample_size",
+    "linslope",
+    "mae",
+    "mape",
+    "me",
+    "median_absolute_error",
+    "mse",
+    "pearson_r",
+    "pearson_r_eff_p_value",
+    "pearson_r_p_value",
+    "r2",
+    "rmse",
+    "smape",
+    "spearman_r",
+    "spearman_r_eff_p_value",
+    "spearman_r_p_value",
+    "anomaly_correlation_coefficient",
+    # probabilistic
+    "brier_score",
+    "crps_ensemble",
+    "crps_gaussian",
+    "crps_quadrature",
+    "discrimination",
+    "rank_histogram",
+    "reliability",
+    "roc",
+    "rps",
+    "threshold_brier_score",
+    # resampling/stat tests
+    "resample_iterations",
+    "resample_iterations_idx",
+    "multipletests",
+    "show_versions",
+    # viz
+    "plot_rank_histogram",
+    "plot_rank_histogram_map_cartopy",
+]
+
+
+def __getattr__(name):
+    # Fallback for newly added deterministic functions without restarting.
+    from xskillscore.core import deterministic  # local import
+
+    if hasattr(deterministic, name):
+        return getattr(deterministic, name)
+    raise AttributeError(f"module 'xskillscore' has no attribute '{name}'")
+
 
 try:
     __version__ = version("xskillscore")
